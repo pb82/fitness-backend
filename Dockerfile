@@ -3,4 +3,5 @@ ARG BINARY=./fitness-backend
 EXPOSE 3000
 
 COPY ${BINARY} /opt/fitness-backend
+RUN chmod +x /opt/fitness-backend
 ENTRYPOINT ["/opt/fitness-backend"]

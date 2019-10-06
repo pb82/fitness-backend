@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	"github.com/pb82/fitness-backend/model"
+	"github.com/pb82/fitness-backend/store"
 	"log"
 	"net/http"
 	"os"
@@ -14,120 +16,155 @@ import (
 	"time"
 )
 
-type Heartrate struct {
-	Timestamp int `json:"timestamp"`
-	Bpm       int `json:"bpm"`
-}
+const (
+	WorkoutSpeed     = "speed"
+	WorkoutHeartrate = "heartrate"
+)
 
-type Location struct {
-	Timestamp int     `json:"timestamp"`
-	Lat       float64 `json:"lat"`
-	Lon       float64 `json:"lon"`
-	Speed     float64 `json:"speed"`
-}
+var port string
+var path string
+var db store.WorkoutStore
 
-type Workout struct {
-	Timestamp int         `json:"timestamp"`
-	Heartrate []Heartrate `json:"heartrate"`
-	Location  []Location  `json:"location"`
-}
-
-type GrafanaRequestTarget struct {
-	Target string `json:"target"`
-	RefId  string `json:"refId"`
-	Type   string `json:"type"`
-}
-
-type GrafanaRequest struct {
-	Targets []GrafanaRequestTarget `json:"targets"`
-}
-
-type GrafanaResponse struct {
-	Target     string      `json:"target"`
-	Datapoints [][]float32 `json:"datapoints"`
-}
-
-var workout = Workout{
-	Timestamp: int(time.Now().Unix()),
-	Heartrate: []Heartrate{
-		{
-			Timestamp: int(time.Now().Unix()),
-			Bpm:       100,
-		},
-		{
-			Timestamp: int(time.Now().Unix()) + 1000,
-			Bpm:       105,
-		},
-		{
-			Timestamp: int(time.Now().Unix()) + 2000,
-			Bpm:       90,
-		},
-	},
-	Location: []Location{
-		{
-			Timestamp: int(time.Now().Unix()),
-			Lat:       0,
-			Lon:       0,
-			Speed:     10,
-		},
-	},
-}
-
+// Probe endpoint: let grafana know that the backend is responding
 func Index(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// Return the time series that this backend can return
 func Search(w http.ResponseWriter, r *http.Request) {
-	timeseries := []string{"heartrate", "location", "speed"}
+	timeseries := []string{WorkoutHeartrate, WorkoutSpeed}
 	json.NewEncoder(w).Encode(timeseries)
 }
 
-func Query(w http.ResponseWriter, r *http.Request) {
-	decoder := json.NewDecoder(r.Body)
-	var q GrafanaRequest
-	err := decoder.Decode(&q)
+// Return the keys that can be used for filters
+func TagKeys(w http.ResponseWriter, r *http.Request) {
+	keys := []model.GrafanaTagKey{
+		{
+			Type: "string",
+			Text: model.GrafanaWorkoutKey,
+		},
+	}
+	json.NewEncoder(w).Encode(keys)
+}
 
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+// Return the values that can be used for filters
+func TagValues(w http.ResponseWriter, r *http.Request) {
+	var tags []model.GrafanaTagValue
+	for _, workout := range db.Workouts {
+		tags = append(tags, model.GrafanaTagValue{Text: workout.ToHuman()})
+	}
+	json.NewEncoder(w).Encode(tags)
+}
+
+func QueryHeartrate(workout *model.Workout, request *model.GrafanaRequest) *model.GrafanaResponse {
+	response := model.GrafanaResponse{
+		Target:     WorkoutHeartrate,
+		Datapoints: []model.Datapoint{},
+	}
+
+	for _, heartrate := range workout.Heartrate {
+		if model.MatchesTime(heartrate.Timestamp, request.Range.FromMillis(), request.Range.ToMillis()) {
+			response.Datapoints = append(response.Datapoints, model.Datapoint{
+				float32(heartrate.Bpm), float32(heartrate.Timestamp),
+			})
+		}
+	}
+
+	return &response
+}
+
+func QuerySpeed(workout *model.Workout, request *model.GrafanaRequest) *model.GrafanaResponse {
+	response := model.GrafanaResponse{
+		Target:     WorkoutSpeed,
+		Datapoints: []model.Datapoint{},
+	}
+
+	for _, location := range workout.Location {
+		if model.MatchesTime(location.Timestamp, request.Range.FromMillis(), request.Range.ToMillis()) {
+			response.Datapoints = append(response.Datapoints, model.Datapoint{
+				float32(location.Speed), float32(location.Timestamp),
+			})
+		}
+	}
+
+	return &response
+}
+
+func Query(w http.ResponseWriter, r *http.Request) {
+	if db.Empty() {
+		json.NewEncoder(w).Encode([]string{})
 		return
 	}
 
-	var response []GrafanaResponse
-	for _, target := range q.Targets {
-		if target.Target == "heartrate" {
-			heartrateResponse := GrafanaResponse{
-				Target: "heartrate",
-			}
+	request := model.GrafanaRequest{}
+	json.NewDecoder(r.Body).Decode(&request)
 
-			for _, heartrate := range workout.Heartrate {
-				heartrateResponse.Datapoints = append(heartrateResponse.Datapoints, []float32{
-					float32(heartrate.Bpm), float32(heartrate.Timestamp),
-				})
-			}
+	workout := db.Filter(request.AdhocFilters)
+	if workout == nil {
+		json.NewEncoder(w).Encode([]string{})
+		return
+	}
 
-			response = append(response, heartrateResponse)
+	var response []*model.GrafanaResponse
+	for _, target := range request.Targets {
+		switch (target.Target) {
+		case WorkoutHeartrate:
+			response = append(response, QueryHeartrate(workout, &request))
+		case WorkoutSpeed:
+			response = append(response, QuerySpeed(workout, &request))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 	}
 
 	json.NewEncoder(w).Encode(response)
 }
 
-func main() {
-	var port string
-	flag.StringVar(&port, "port", "3000", "http server port")
-	flag.Parse()
+// Upload new workout
+func Push(w http.ResponseWriter, r *http.Request) {
+	workout := model.Workout{}
+	err := json.NewDecoder(r.Body).Decode(&workout)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 
+	for _, existingWorkout := range db.Workouts {
+		if workout.Timestamp == existingWorkout.Timestamp {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+	}
+
+	db.Add(&workout)
+	log.Printf("imported workout %s", workout.ToHuman())
+}
+
+func init() {
+	flag.StringVar(&port, "port", "3000", "http server port")
+	flag.StringVar(&path, "path", "./", "upload directory")
+	flag.Parse()
+}
+
+func main() {
 	r := mux.NewRouter()
+
+	// Grafana json datastore api
 	r.HandleFunc("/", Index).Methods("GET")
 	r.HandleFunc("/search", Search).Methods("GET", "POST")
-	r.HandleFunc("/query", Query).Methods("POST")
+	r.HandleFunc("/query", Query).Methods("POST", "GET")
+	r.HandleFunc("/tag-keys", TagKeys).Methods("POST", "GET")
+	r.HandleFunc("/tag-values", TagValues).Methods("POST", "GET")
+
+	// Push new workouts
+	r.HandleFunc("/push", Push).Methods("POST")
 
 	cors := handlers.CORS(
 		handlers.AllowedOrigins([]string{"*"}),
 		handlers.AllowedMethods([]string{"GET", "POST"}),
 		handlers.AllowedHeaders([]string{"accep", "content-type"}),
 	)
-
 	r.Use(cors)
 
 	server := &http.Server{
