@@ -114,7 +114,7 @@ func Query(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	var port string
-	flag.StringVar(&port, "port", "8080", "http server port")
+	flag.StringVar(&port, "port", "3000", "http server port")
 	flag.Parse()
 
 	r := mux.NewRouter()
