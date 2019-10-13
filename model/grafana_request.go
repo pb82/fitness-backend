@@ -30,12 +30,12 @@ type GrafanaFilter struct {
 }
 
 func toMillis(timestamp string) int64 {
-	time, err := time.Parse(TimeLayout, timestamp)
+	t, err := time.Parse(TimeLayout, timestamp)
 	if err != nil {
 		return -1
 	}
 
-	return time.Unix()
+	return t.UnixNano() / int64(time.Millisecond)
 }
 
 func (r *GrafanaRequestRange) FromMillis() int64 {

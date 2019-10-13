@@ -1,13 +1,13 @@
 package model
 
-type Datapoint []float32
+type Datapoint []float64
 
 type GrafanaResponse struct {
 	Target     string      `json:"target"`
 	Datapoints []Datapoint `json:"datapoints"`
 }
 
-func (r *GrafanaResponse) AddDatapoint(metric, timestamp float32) {
+func (r *GrafanaResponse) AddDatapoint(metric, timestamp float64) {
 	r.Datapoints = append(r.Datapoints, Datapoint{metric, timestamp})
 }
 

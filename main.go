@@ -19,6 +19,7 @@ import (
 const (
 	WorkoutSpeed     = "speed"
 	WorkoutHeartrate = "heartrate"
+	WorkoutAltitude  = "altitude"
 )
 
 var port string
@@ -32,7 +33,7 @@ func Index(w http.ResponseWriter, r *http.Request) {
 
 // Return the time series that this backend can return
 func Search(w http.ResponseWriter, r *http.Request) {
-	timeseries := []string{WorkoutHeartrate, WorkoutSpeed}
+	timeseries := []string{WorkoutHeartrate, WorkoutSpeed, WorkoutAltitude}
 	json.NewEncoder(w).Encode(timeseries)
 }
 
@@ -65,11 +66,12 @@ func QueryHeartrate(workout *model.Workout, request *model.GrafanaRequest) *mode
 	for _, heartrate := range workout.Heartrate {
 		if model.MatchesTime(heartrate.Timestamp, request.Range.FromMillis(), request.Range.ToMillis()) {
 			response.Datapoints = append(response.Datapoints, model.Datapoint{
-				float32(heartrate.Bpm), float32(heartrate.Timestamp),
+				float64(heartrate.Bpm), float64(heartrate.Timestamp),
 			})
 		}
 	}
 
+	log.Printf("QueryHeartrate: returning %v result(s)", len(response.Datapoints))
 	return &response
 }
 
@@ -82,11 +84,30 @@ func QuerySpeed(workout *model.Workout, request *model.GrafanaRequest) *model.Gr
 	for _, location := range workout.Location {
 		if model.MatchesTime(location.Timestamp, request.Range.FromMillis(), request.Range.ToMillis()) {
 			response.Datapoints = append(response.Datapoints, model.Datapoint{
-				float32(location.Speed), float32(location.Timestamp),
+				float64(location.Speed), float64(location.Timestamp),
 			})
 		}
 	}
 
+	log.Printf("QuerySpeed: returning %v result(s)", len(response.Datapoints))
+	return &response
+}
+
+func QueryAltitude(workout *model.Workout, request *model.GrafanaRequest) *model.GrafanaResponse {
+	response := model.GrafanaResponse{
+		Target:     WorkoutAltitude,
+		Datapoints: []model.Datapoint{},
+	}
+
+	for _, location := range workout.Location {
+		if model.MatchesTime(location.Timestamp, request.Range.FromMillis(), request.Range.ToMillis()) {
+			response.Datapoints = append(response.Datapoints, model.Datapoint{
+				float64(location.Altitude), float64(location.Timestamp),
+			})
+		}
+	}
+
+	log.Printf("QueryAltitude: returning %v result(s)", len(response.Datapoints))
 	return &response
 }
 
@@ -112,6 +133,8 @@ func Query(w http.ResponseWriter, r *http.Request) {
 			response = append(response, QueryHeartrate(workout, &request))
 		case WorkoutSpeed:
 			response = append(response, QuerySpeed(workout, &request))
+		case WorkoutAltitude:
+			response = append(response, QueryAltitude(workout, &request))
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 			return
